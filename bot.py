@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from dotenv import load_dotenv
 from telegram import Update
@@ -17,6 +18,11 @@ TARGET_USER_IDS = [
     for uid in os.getenv("TARGET_USER_IDS", "").split(",")
     if uid.strip()
 ]
+REPLY_BOT_IDS = [
+    int(uid.strip())
+    for uid in os.getenv("REPLY_BOT_IDS", "").split(",")
+    if uid.strip()
+]
 SOURCE_CHAT_ID = int(os.getenv("SOURCE_CHAT_ID", "0"))
 TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "0"))
 
@@ -26,6 +32,17 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# ============ CA 正则 ============
+# BSC / ETH 等 EVM 链地址：0x 开头 + 40 位十六进制
+EVM_CA_PATTERN = re.compile(r"0x[0-9a-fA-F]{40}")
+# Solana 地址：Base58 编码，32‑44 个字符（排除 0/O/I/l）
+SOLANA_CA_PATTERN = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
+
+
+def contains_ca(text: str) -> bool:
+    """判断文本是否包含合约地址"""
+    return bool(EVM_CA_PATTERN.search(text) or SOLANA_CA_PATTERN.search(text))
 
 
 # ============ Telegram 消息处理 ============
@@ -48,13 +65,27 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if SOURCE_CHAT_ID and message.chat_id != SOURCE_CHAT_ID:
         return
 
-    # 只转发目标用户的消息
-    if TARGET_USER_IDS and user.id not in TARGET_USER_IDS:
+    is_target_user = user.id in TARGET_USER_IDS
+    is_reply_bot = user.id in REPLY_BOT_IDS
+
+    # 既不是目标用户，也不是监听的机器人，跳过
+    if not is_target_user and not is_reply_bot:
+        return
+
+    # 如果是机器人，只转发回复目标用户的消息
+    if is_reply_bot:
+        reply = message.reply_to_message
+        if not reply or not reply.from_user or reply.from_user.id not in TARGET_USER_IDS:
+            return
+
+    text = message.text or message.caption or ""
+
+    # 只转发包含合约地址（CA）的消息
+    if not contains_ca(text):
         return
 
     user_display = user.full_name or user.username or str(user.id)
     chat_title = message.chat.title or "私聊"
-    text = message.text or message.caption or "[非文本消息]"
 
     forward_text = f"来自 {user_display} ({chat_title}):\n\n{text}"
 
